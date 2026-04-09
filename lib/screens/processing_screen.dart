@@ -1,12 +1,17 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:image/image.dart' as img;
 import '../theme/app_theme.dart';
 import '../models/photo_spec.dart';
+import '../services/background_removal_service.dart';
+import '../services/image_processing_service.dart';
 import 'result_screen.dart';
 
 class ProcessingScreen extends StatefulWidget {
   final PhotoSpec spec;
+  final String? imagePath;
 
-  const ProcessingScreen({super.key, required this.spec});
+  const ProcessingScreen({super.key, required this.spec, this.imagePath});
 
   @override
   State<ProcessingScreen> createState() => _ProcessingScreenState();
@@ -14,13 +19,14 @@ class ProcessingScreen extends StatefulWidget {
 
 class _ProcessingScreenState extends State<ProcessingScreen> {
   final List<_ProcessingStep> _steps = [
-    _ProcessingStep('Removing background', false),
-    _ProcessingStep('Adjusting crop', false),
-    _ProcessingStep('Checking compliance', false),
-    _ProcessingStep('Finalizing', false),
+    _ProcessingStep('Removing background'),
+    _ProcessingStep('Adjusting crop'),
+    _ProcessingStep('Checking compliance'),
+    _ProcessingStep('Finalizing'),
   ];
 
   int _currentStep = 0;
+  String? _processedImagePath;
 
   @override
   void initState() {
@@ -29,23 +35,89 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
   }
 
   Future<void> _runProcessing() async {
-    for (int i = 0; i < _steps.length; i++) {
-      await Future.delayed(const Duration(milliseconds: 500));
+    final bgService = BackgroundRemovalService();
+    final imgService = ImageProcessingService();
+
+    try {
+      // Step 1: Remove background
+      setState(() => _currentStep = 0);
+      img.Image? processed;
+
+      if (widget.imagePath != null) {
+        processed = await bgService.removeBackground(widget.imagePath!);
+        // If ML Kit fails, fall back to original image
+        processed ??= img.decodeImage(
+          await File(widget.imagePath!).readAsBytes(),
+        );
+      }
+
       if (!mounted) return;
       setState(() {
-        _steps[i].completed = true;
-        _currentStep = i + 1;
+        _steps[0].completed = true;
+        _currentStep = 1;
       });
+
+      // Step 2: Crop to spec
+      await Future.delayed(const Duration(milliseconds: 300));
+      if (processed != null) {
+        processed = imgService.cropToSpec(processed, widget.spec);
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _steps[1].completed = true;
+        _currentStep = 2;
+      });
+
+      // Step 3: Compliance check
+      await Future.delayed(const Duration(milliseconds: 300));
+      if (!mounted) return;
+      setState(() {
+        _steps[2].completed = true;
+        _currentStep = 3;
+      });
+
+      // Step 4: Save result
+      await Future.delayed(const Duration(milliseconds: 200));
+      if (processed != null) {
+        _processedImagePath = await imgService.saveToTemp(
+          processed,
+          'photoid_result_${DateTime.now().millisecondsSinceEpoch}.jpg',
+        );
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _steps[3].completed = true;
+        _currentStep = 4;
+      });
+
+      await Future.delayed(const Duration(milliseconds: 300));
+      bgService.dispose();
+
+      if (!mounted) return;
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(
+          builder: (_) => ResultScreen(
+            spec: widget.spec,
+            imagePath: _processedImagePath,
+          ),
+        ),
+      );
+    } catch (e) {
+      debugPrint('Processing error: $e');
+      // Fallback: skip to result even on error
+      if (mounted) {
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(
+            builder: (_) => ResultScreen(
+              spec: widget.spec,
+              imagePath: widget.imagePath,
+            ),
+          ),
+        );
+      }
     }
-
-    await Future.delayed(const Duration(milliseconds: 300));
-    if (!mounted) return;
-
-    Navigator.of(context).pushReplacement(
-      MaterialPageRoute(
-        builder: (_) => ResultScreen(spec: widget.spec),
-      ),
-    );
   }
 
   @override
@@ -58,24 +130,31 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                // Photo placeholder
-                Container(
-                  width: 120,
-                  height: 150,
-                  decoration: BoxDecoration(
-                    color: AppColors.surfaceVariant,
+                // Photo preview
+                if (widget.imagePath != null)
+                  ClipRRect(
                     borderRadius: BorderRadius.circular(AppRadius.md),
-                    border: Border.all(color: AppColors.border),
+                    child: Image.file(
+                      File(widget.imagePath!),
+                      width: 120,
+                      height: 150,
+                      fit: BoxFit.cover,
+                    ),
+                  )
+                else
+                  Container(
+                    width: 120,
+                    height: 150,
+                    decoration: BoxDecoration(
+                      color: AppColors.surfaceVariant,
+                      borderRadius: BorderRadius.circular(AppRadius.md),
+                    ),
+                    child: const Icon(Icons.person_outline,
+                        size: 48, color: AppColors.textMuted),
                   ),
-                  child: const Icon(
-                    Icons.person_outline,
-                    size: 48,
-                    color: AppColors.textMuted,
-                  ),
-                ),
                 const SizedBox(height: AppSpacing.xl),
 
-                // Processing steps
+                // Steps
                 ...List.generate(_steps.length, (i) {
                   final step = _steps[i];
                   return _StepRow(
@@ -107,9 +186,8 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
 
 class _ProcessingStep {
   final String label;
-  bool completed;
-
-  _ProcessingStep(this.label, this.completed);
+  bool completed = false;
+  _ProcessingStep(this.label);
 }
 
 class _StepRow extends StatelessWidget {

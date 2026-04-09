@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import '../theme/app_theme.dart';
 import '../models/photo_spec.dart';
@@ -8,8 +9,9 @@ enum OutputFormat { digital, print4, print6 }
 
 class ResultScreen extends StatefulWidget {
   final PhotoSpec spec;
+  final String? imagePath;
 
-  const ResultScreen({super.key, required this.spec});
+  const ResultScreen({super.key, required this.spec, this.imagePath});
 
   @override
   State<ResultScreen> createState() => _ResultScreenState();
@@ -43,19 +45,21 @@ class _ResultScreenState extends State<ResultScreen> {
                     flex: 2,
                     child: AspectRatio(
                       aspectRatio: widget.spec.widthMm / widget.spec.heightMm,
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: AppColors.surfaceVariant,
-                          borderRadius: BorderRadius.circular(AppRadius.md),
-                          border: Border.all(color: AppColors.border),
-                        ),
-                        child: const Center(
-                          child: Icon(
-                            Icons.person_outline,
-                            size: 64,
-                            color: AppColors.textMuted,
-                          ),
-                        ),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(AppRadius.md),
+                        child: widget.imagePath != null
+                            ? Image.file(
+                                File(widget.imagePath!),
+                                fit: BoxFit.cover,
+                              )
+                            : Container(
+                                color: AppColors.surfaceVariant,
+                                child: const Icon(
+                                  Icons.person_outline,
+                                  size: 64,
+                                  color: AppColors.textMuted,
+                                ),
+                              ),
                       ),
                     ),
                   ),

@@ -1,6 +1,10 @@
+import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../theme/app_theme.dart';
 import '../models/photo_spec.dart';
+import '../services/camera_service.dart';
+import '../services/face_detection_service.dart';
 import '../widgets/compliance_check_item.dart';
 import 'processing_screen.dart';
 
@@ -15,23 +19,13 @@ class CameraScreen extends StatefulWidget {
 
 class _CameraScreenState extends State<CameraScreen>
     with SingleTickerProviderStateMixin {
+  final CameraService _cameraService = CameraService();
+  final FaceDetectionService _faceService = FaceDetectionService();
   late AnimationController _pulseController;
 
-  // Simulated compliance checks (will be driven by ML Kit in production)
-  final Map<String, CheckStatus> _checks = {
-    'Face detected': CheckStatus.passing,
-    'Head straight': CheckStatus.passing,
-    'Move slightly closer': CheckStatus.warning,
-    'Eyes open': CheckStatus.passing,
-    'Neutral expression': CheckStatus.passing,
-  };
-
-  bool get _allPassing =>
-      _checks.values.where((s) => s == CheckStatus.failing).isEmpty &&
-      _checks.values.where((s) => s == CheckStatus.warning).isEmpty;
-
-  bool get _canCapture =>
-      _checks.values.where((s) => s == CheckStatus.passing).length >= 3;
+  ComplianceResult _compliance = ComplianceResult.empty;
+  bool _isReady = false;
+  int _allPassingFrames = 0;
 
   @override
   void initState() {
@@ -40,11 +34,47 @@ class _CameraScreenState extends State<CameraScreen>
       vsync: this,
       duration: const Duration(milliseconds: 1200),
     )..repeat(reverse: true);
+    _initCamera();
+  }
+
+  Future<void> _initCamera() async {
+    await _cameraService.initialize();
+    if (!mounted) return;
+
+    setState(() => _isReady = _cameraService.isInitialized);
+
+    if (_cameraService.isInitialized) {
+      _startDetection();
+    }
+  }
+
+  void _startDetection() {
+    final cameras = _cameraService.controller!.description;
+    _cameraService.startImageStream((image) async {
+      final result = await _faceService.processImage(image, cameras);
+      if (!mounted) return;
+      setState(() {
+        _compliance = result;
+        if (result.allPassing) {
+          _allPassingFrames++;
+        } else {
+          _allPassingFrames = 0;
+        }
+      });
+
+      // Auto-capture after 30 frames (~1 second) of all passing
+      if (_allPassingFrames >= 30) {
+        _allPassingFrames = 0;
+        _onCapture();
+      }
+    });
   }
 
   @override
   void dispose() {
     _pulseController.dispose();
+    _cameraService.dispose();
+    _faceService.dispose();
     super.dispose();
   }
 
@@ -81,20 +111,51 @@ class _CameraScreenState extends State<CameraScreen>
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  // Checks
-                  ..._checks.entries.map((e) => ComplianceCheckItem(
-                        label: e.key,
-                        status: e.value,
-                      )),
+                  ComplianceCheckItem(
+                    label: 'Face detected',
+                    status: _compliance.faceDetected
+                        ? CheckStatus.passing
+                        : CheckStatus.failing,
+                  ),
+                  ComplianceCheckItem(
+                    label: 'Head straight',
+                    status: _compliance.faceDetected
+                        ? (_compliance.headStraight
+                            ? CheckStatus.passing
+                            : CheckStatus.warning)
+                        : CheckStatus.pending,
+                  ),
+                  ComplianceCheckItem(
+                    label: _compliance.distanceHint ?? 'Proper distance',
+                    status: _compliance.faceDetected
+                        ? (_compliance.properDistance
+                            ? CheckStatus.passing
+                            : CheckStatus.warning)
+                        : CheckStatus.pending,
+                  ),
+                  ComplianceCheckItem(
+                    label: 'Eyes open',
+                    status: _compliance.faceDetected
+                        ? (_compliance.eyesOpen
+                            ? CheckStatus.passing
+                            : CheckStatus.warning)
+                        : CheckStatus.pending,
+                  ),
+                  ComplianceCheckItem(
+                    label: 'Neutral expression',
+                    status: _compliance.faceDetected
+                        ? (_compliance.neutralExpression
+                            ? CheckStatus.passing
+                            : CheckStatus.warning)
+                        : CheckStatus.pending,
+                  ),
                   const SizedBox(height: AppSpacing.md),
-
-                  // Capture button
                   _buildCaptureButton(),
                   const SizedBox(height: AppSpacing.sm),
-
-                  // Hint text
                   Text(
-                    _allPassing ? 'Ready! Tap to capture.' : 'Hold steady for best results',
+                    _compliance.allPassing
+                        ? 'Ready! Tap to capture.'
+                        : 'Hold steady for best results',
                     style: const TextStyle(
                       color: AppColors.textMuted,
                       fontSize: 13,
@@ -110,29 +171,27 @@ class _CameraScreenState extends State<CameraScreen>
   }
 
   Widget _buildViewfinder() {
-    return Container(
-      margin: const EdgeInsets.all(AppSpacing.md),
-      decoration: BoxDecoration(
-        color: const Color(0xFF2A2A2A),
-        borderRadius: BorderRadius.circular(AppRadius.lg),
-      ),
+    if (!_isReady) {
+      return const Center(
+        child: CircularProgressIndicator(color: Colors.white),
+      );
+    }
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(AppRadius.lg),
       child: Stack(
         alignment: Alignment.center,
         children: [
-          // Placeholder for camera feed
-          const Center(
-            child: Icon(
-              Icons.camera_alt_outlined,
-              size: 48,
-              color: Colors.white24,
-            ),
+          // Camera preview
+          Positioned.fill(
+            child: CameraPreview(_cameraService.controller!),
           ),
 
           // Face guide oval
           CustomPaint(
             size: const Size(200, 260),
             painter: _FaceGuidePainter(
-              isCompliant: _allPassing,
+              isCompliant: _compliance.allPassing,
             ),
           ),
         ],
@@ -141,30 +200,30 @@ class _CameraScreenState extends State<CameraScreen>
   }
 
   Widget _buildCaptureButton() {
+    final canCapture = _compliance.passingCount >= 3;
+
     return AnimatedBuilder(
       animation: _pulseController,
       builder: (context, child) {
-        final scale = _canCapture
-            ? 1.0 + (_pulseController.value * 0.04)
-            : 1.0;
+        final scale = canCapture ? 1.0 + (_pulseController.value * 0.04) : 1.0;
         return Transform.scale(
           scale: scale,
           child: GestureDetector(
-            onTap: _canCapture ? _onCapture : null,
+            onTap: canCapture ? _onCapture : null,
             child: Container(
               width: 72,
               height: 72,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: _canCapture ? AppColors.primary : Colors.grey.shade700,
+                color: canCapture ? AppColors.primary : Colors.grey.shade700,
                 border: Border.all(
-                  color: _canCapture ? AppColors.success : Colors.grey.shade600,
+                  color: canCapture ? AppColors.success : Colors.grey.shade600,
                   width: 4,
                 ),
               ),
               child: Icon(
                 Icons.camera_alt,
-                color: _canCapture ? Colors.white : Colors.grey.shade500,
+                color: canCapture ? Colors.white : Colors.grey.shade500,
                 size: 32,
               ),
             ),
@@ -174,10 +233,20 @@ class _CameraScreenState extends State<CameraScreen>
     );
   }
 
-  void _onCapture() {
+  Future<void> _onCapture() async {
+    // Stop stream before capture
+    await _cameraService.stopImageStream();
+    HapticFeedback.mediumImpact();
+
+    final photo = await _cameraService.takePicture();
+    if (photo == null || !mounted) return;
+
     Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => ProcessingScreen(spec: widget.spec),
+        builder: (_) => ProcessingScreen(
+          spec: widget.spec,
+          imagePath: photo.path,
+        ),
       ),
     );
   }
@@ -199,7 +268,6 @@ class _FaceGuidePainter extends CustomPainter {
 
     if (!isCompliant) {
       paint.strokeCap = StrokeCap.round;
-      // Dashed effect for non-compliant
       const dashWidth = 8.0;
       const dashSpace = 6.0;
       final path = Path()
